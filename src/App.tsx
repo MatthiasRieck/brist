@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import "./App.css";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 
 function App() {
   const [folders, setFolders] = useState<string[]>([]);
@@ -24,21 +25,28 @@ function App() {
   }
 
   return (
-    <main className="container">
-      <h1>brist</h1>
-      <button className="add-btn" onClick={addFolder}>
-        + Add Folder
-      </button>
+    <main className="mx-auto max-w-2xl p-8">
+      <h1 className="mb-6 text-2xl font-bold">brist</h1>
+      <Button onClick={addFolder}>+ Add Folder</Button>
       {folders.length === 0 ? (
-        <p className="empty">No folders added yet.</p>
+        <p className="mt-6 text-sm text-muted-foreground">No folders added yet.</p>
       ) : (
-        <ul className="folder-list">
+        <ul className="mt-4 flex flex-col gap-2">
           {folders.map((folder) => (
-            <li key={folder} className="folder-item">
-              <span className="folder-path">{folder}</span>
-              <button className="remove-btn" onClick={() => removeFolder(folder)}>
-                Remove
-              </button>
+            <li key={folder}>
+              <Card>
+                <CardContent className="flex items-center justify-between py-3">
+                  <span className="break-all text-sm">{folder}</span>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-4 shrink-0 hover:bg-destructive hover:text-destructive-foreground"
+                    onClick={() => removeFolder(folder)}
+                  >
+                    Remove
+                  </Button>
+                </CardContent>
+              </Card>
             </li>
           ))}
         </ul>
