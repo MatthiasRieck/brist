@@ -63,6 +63,45 @@ fn remove_folder(app: tauri::AppHandle, path: String) -> Result<Vec<String>, Str
     Ok(config.folders)
 }
 
+fn find_git_repos(root: &Path) -> Vec<PathBuf> {
+    let mut repos = Vec::new();
+    let entries = match fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return repos,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
+            continue;
+        }
+        if path.join(".git").exists() {
+            repos.push(path);
+        } else {
+            repos.extend(find_git_repos(&path));
+        }
+    }
+    repos
+}
+
+#[tauri::command]
+fn scan_repositories(app: tauri::AppHandle) -> Vec<String> {
+    let config = read_config(&app);
+    let mut repos: Vec<String> = config
+        .folders
+        .iter()
+        .flat_map(|folder| find_git_repos(Path::new(folder)))
+        .filter_map(|p| p.to_str().map(String::from))
+        .collect();
+    repos.sort();
+    repos.dedup();
+    repos
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -71,7 +110,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_folders,
             add_folder,
-            remove_folder
+            remove_folder,
+            scan_repositories
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -172,5 +212,55 @@ mod tests {
 
         let loaded = read_config_from_path(&path);
         assert_eq!(loaded.folders, vec!["/home/user/docs"]);
+    }
+
+    #[test]
+    fn find_git_repos_discovers_repos_at_various_depths() {
+        let dir = tempdir().unwrap();
+        // shallow repo
+        let shallow = dir.path().join("shallow");
+        fs::create_dir_all(shallow.join(".git")).unwrap();
+        // nested repo
+        let nested = dir.path().join("a").join("b").join("deep");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        // non-repo directory
+        fs::create_dir_all(dir.path().join("empty")).unwrap();
+
+        let mut repos = find_git_repos(dir.path());
+        repos.sort();
+        assert_eq!(repos.len(), 2);
+        assert!(repos.iter().any(|p| p.ends_with("shallow")));
+        assert!(repos.iter().any(|p| p.ends_with("deep")));
+    }
+
+    #[test]
+    fn find_git_repos_skips_dot_dirs_node_modules_and_target() {
+        let dir = tempdir().unwrap();
+        // these should be skipped
+        fs::create_dir_all(dir.path().join(".hidden").join(".git")).unwrap();
+        fs::create_dir_all(dir.path().join("node_modules").join(".git")).unwrap();
+        fs::create_dir_all(dir.path().join("target").join(".git")).unwrap();
+        // this should be found
+        let visible = dir.path().join("visible");
+        fs::create_dir_all(visible.join(".git")).unwrap();
+
+        let repos = find_git_repos(dir.path());
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].ends_with("visible"));
+    }
+
+    #[test]
+    fn find_git_repos_does_not_recurse_into_git_repos() {
+        let dir = tempdir().unwrap();
+        // outer repo — should be found
+        let outer = dir.path().join("outer");
+        fs::create_dir_all(outer.join(".git")).unwrap();
+        // inner repo nested inside outer — should NOT be found
+        let inner = outer.join("inner");
+        fs::create_dir_all(inner.join(".git")).unwrap();
+
+        let repos = find_git_repos(dir.path());
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].ends_with("outer"));
     }
 }

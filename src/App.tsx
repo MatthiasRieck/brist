@@ -6,9 +6,16 @@ import { Card, CardContent } from "@/components/ui/card";
 
 function App() {
   const [folders, setFolders] = useState<string[]>([]);
+  const [repos, setRepos] = useState<string[]>([]);
 
   useEffect(() => {
-    invoke<string[]>("get_folders").then(setFolders);
+    Promise.all([
+      invoke<string[]>("get_folders"),
+      invoke<string[]>("scan_repositories"),
+    ]).then(([loadedFolders, loadedRepos]) => {
+      setFolders(loadedFolders);
+      setRepos(loadedRepos);
+    });
   }, []);
 
   async function addFolder() {
@@ -16,12 +23,16 @@ function App() {
     if (selected) {
       const updated = await invoke<string[]>("add_folder", { path: selected });
       setFolders(updated);
+      const updatedRepos = await invoke<string[]>("scan_repositories");
+      setRepos(updatedRepos);
     }
   }
 
   async function removeFolder(path: string) {
     const updated = await invoke<string[]>("remove_folder", { path });
     setFolders(updated);
+    const updatedRepos = await invoke<string[]>("scan_repositories");
+    setRepos(updatedRepos);
   }
 
   return (
@@ -49,6 +60,26 @@ function App() {
               </Card>
             </li>
           ))}
+        </ul>
+      )}
+      <h2 className="mt-10 mb-4 text-xl font-semibold">Repositories</h2>
+      {repos.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No repositories found.</p>
+      ) : (
+        <ul className="flex flex-col gap-2">
+          {repos.map((repo) => {
+            const name = repo.split("/").pop() ?? repo;
+            return (
+              <li key={repo}>
+                <Card>
+                  <CardContent className="py-3">
+                    <p className="text-sm font-semibold">{name}</p>
+                    <p className="break-all text-xs text-muted-foreground">{repo}</p>
+                  </CardContent>
+                </Card>
+              </li>
+            );
+          })}
         </ul>
       )}
     </main>
