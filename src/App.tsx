@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar";
+import { useHeader } from "@/contexts/HeaderContext";
 
 interface FileTreeNode {
   name: string;
@@ -69,15 +71,24 @@ function buildFileTree(repos: string[], rootFolder: string): FileTreeNode[] {
   return toNodes(root, rootFolder);
 }
 
-function SubTreeItem({ node }: { node: FileTreeNode }) {
+function SubTreeItem({
+  node,
+  selectedRepoPath,
+  onSelect,
+}: {
+  node: FileTreeNode;
+  selectedRepoPath?: string;
+  onSelect: (path: string) => void;
+}) {
   const [open, setOpen] = useState(true);
+  const isSelected = node.fullPath === selectedRepoPath;
 
   if (node.isRepo || node.children.length === 0) {
     return (
       <SidebarMenuSubItem>
-        <SidebarMenuSubButton>
+        <SidebarMenuSubButton onClick={() => onSelect(node.fullPath)}>
           <GitBranch className="shrink-0" />
-          <span>{node.name}</span>
+          <span className={cn(isSelected && "font-bold")}>{node.name}</span>
         </SidebarMenuSubButton>
       </SidebarMenuSubItem>
     );
@@ -92,7 +103,12 @@ function SubTreeItem({ node }: { node: FileTreeNode }) {
       {open && (
         <SidebarMenuSub>
           {node.children.map((child) => (
-            <SubTreeItem key={child.fullPath} node={child} />
+            <SubTreeItem
+              key={child.fullPath}
+              node={child}
+              selectedRepoPath={selectedRepoPath}
+              onSelect={onSelect}
+            />
           ))}
         </SidebarMenuSub>
       )}
@@ -100,15 +116,24 @@ function SubTreeItem({ node }: { node: FileTreeNode }) {
   );
 }
 
-function TopLevelTreeItem({ node }: { node: FileTreeNode }) {
+function TopLevelTreeItem({
+  node,
+  selectedRepoPath,
+  onSelect,
+}: {
+  node: FileTreeNode;
+  selectedRepoPath?: string;
+  onSelect: (path: string) => void;
+}) {
   const [open, setOpen] = useState(true);
+  const isSelected = node.fullPath === selectedRepoPath;
 
   if (node.isRepo || node.children.length === 0) {
     return (
       <SidebarMenuItem>
-        <SidebarMenuButton>
+        <SidebarMenuButton onClick={() => onSelect(node.fullPath)}>
           <GitBranch className="shrink-0" />
-          <span>{node.name}</span>
+          <span className={cn(isSelected && "font-bold")}>{node.name}</span>
         </SidebarMenuButton>
       </SidebarMenuItem>
     );
@@ -123,7 +148,12 @@ function TopLevelTreeItem({ node }: { node: FileTreeNode }) {
       {open && (
         <SidebarMenuSub>
           {node.children.map((child) => (
-            <SubTreeItem key={child.fullPath} node={child} />
+            <SubTreeItem
+              key={child.fullPath}
+              node={child}
+              selectedRepoPath={selectedRepoPath}
+              onSelect={onSelect}
+            />
           ))}
         </SidebarMenuSub>
       )}
@@ -134,6 +164,16 @@ function TopLevelTreeItem({ node }: { node: FileTreeNode }) {
 function App() {
   const [folders, setFolders] = useState<string[]>([]);
   const [repos, setRepos] = useState<string[]>([]);
+  const { headerContent } = useHeader();
+  const navigate = useNavigate();
+  const selectedRepoPath = useRouterState({
+    select: (state) => {
+      if (state.location.pathname === "/repo") {
+        return (state.location.search as { path?: string }).path;
+      }
+      return undefined;
+    },
+  });
 
   useEffect(() => {
     Promise.all([
@@ -162,9 +202,13 @@ function App() {
     setRepos(updatedRepos);
   }
 
+  function handleSelectRepo(path: string) {
+    navigate({ to: "/repo", search: { path } });
+  }
+
   return (
     <SidebarProvider>
-      <Sidebar>
+      <Sidebar className="border-t">
         <SidebarHeader className="flex flex-row items-center justify-between px-4 py-3">
           <span className="text-lg font-bold">brist</span>
           <Button variant="ghost" size="icon" className="h-7 w-7" onClick={addFolder}>
@@ -176,7 +220,7 @@ function App() {
           {folders.length === 0 ? (
             <p className="px-4 py-2 text-xs text-muted-foreground">No folders added yet.</p>
           ) : (
-            folders.map((folder) => {
+            [...folders].sort((a, b) => a.localeCompare(b)).map((folder) => {
               const folderName = folder.split("/").pop() ?? folder;
               const tree = buildFileTree(repos, folder);
               return (
@@ -195,7 +239,12 @@ function App() {
                     ) : (
                       <SidebarMenu>
                         {tree.map((node) => (
-                          <TopLevelTreeItem key={node.fullPath} node={node} />
+                          <TopLevelTreeItem
+                            key={node.fullPath}
+                            node={node}
+                            selectedRepoPath={selectedRepoPath}
+                            onSelect={handleSelectRepo}
+                          />
                         ))}
                       </SidebarMenu>
                     )}
@@ -206,12 +255,12 @@ function App() {
           )}
         </SidebarContent>
       </Sidebar>
-      <SidebarInset>
+      <SidebarInset className="border-t">
         <header className="flex h-12 items-center gap-2 border-b px-4">
           <SidebarTrigger />
-          <span className="text-sm font-semibold">brist</span>
+          {headerContent}
         </header>
-        <main className="p-6" />
+        <Outlet />
       </SidebarInset>
     </SidebarProvider>
   );
