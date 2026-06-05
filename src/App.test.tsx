@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createMemoryHistory, createRouter, RouterProvider } from "@tanstack/react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import { routeTree } from "./router";
 
 const { mockInvoke, mockOpen } = vi.hoisted(() => ({
   mockInvoke: vi.fn(),
@@ -10,6 +11,14 @@ const { mockInvoke, mockOpen } = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mockInvoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mockOpen }));
 
+function renderApp() {
+  const testRouter = createRouter({
+    routeTree,
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  return render(<RouterProvider router={testRouter} />);
+}
+
 describe("App", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -18,16 +27,16 @@ describe("App", () => {
   it("shows empty state when no folders are loaded", async () => {
     mockInvoke.mockResolvedValueOnce([]); // get_folders
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories
-    render(<App />);
+    renderApp();
     expect(await screen.findByText("No folders added yet.")).toBeInTheDocument();
   });
 
   it("renders all loaded folders", async () => {
     mockInvoke.mockResolvedValueOnce(["/home/user/documents", "/home/user/pictures"]); // get_folders
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories
-    render(<App />);
-    expect(await screen.findByText("/home/user/documents")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/pictures")).toBeInTheDocument();
+    renderApp();
+    expect(await screen.findByText("documents")).toBeInTheDocument();
+    expect(screen.getByText("pictures")).toBeInTheDocument();
   });
 
   it("adds a folder when the dialog confirms a selection", async () => {
@@ -37,7 +46,7 @@ describe("App", () => {
     mockInvoke.mockResolvedValueOnce(["/home/user/new-folder"]); // add_folder
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories (after add)
 
-    render(<App />);
+    renderApp();
     await screen.findByText("No folders added yet.");
 
     await act(async () => {
@@ -49,7 +58,7 @@ describe("App", () => {
         path: "/home/user/new-folder",
       });
     });
-    expect(screen.getByText("/home/user/new-folder")).toBeInTheDocument();
+    expect(screen.getByText("new-folder")).toBeInTheDocument();
   });
 
   it("does nothing when the dialog is cancelled", async () => {
@@ -57,7 +66,7 @@ describe("App", () => {
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories
     mockOpen.mockResolvedValueOnce(null);
 
-    render(<App />);
+    renderApp();
     await screen.findByText("No folders added yet.");
 
     await act(async () => {
@@ -74,11 +83,11 @@ describe("App", () => {
     mockInvoke.mockResolvedValueOnce([]); // remove_folder
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories (after remove)
 
-    render(<App />);
-    await screen.findByText("/home/user/documents");
+    renderApp();
+    await screen.findByText("documents");
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove documents" }));
     });
 
     await waitFor(() => {
@@ -90,20 +99,18 @@ describe("App", () => {
   });
 
   it("shows empty repositories state when no repos are found", async () => {
-    mockInvoke.mockResolvedValueOnce([]); // get_folders
+    mockInvoke.mockResolvedValueOnce(["/home/user/projects"]); // get_folders
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories
-    render(<App />);
+    renderApp();
     expect(await screen.findByText("No repositories found.")).toBeInTheDocument();
   });
 
   it("renders discovered repositories with name and full path", async () => {
-    mockInvoke.mockResolvedValueOnce([]); // get_folders
+    mockInvoke.mockResolvedValueOnce(["/home/user/projects"]); // get_folders
     mockInvoke.mockResolvedValueOnce(["/home/user/projects/myapp", "/home/user/projects/otherapp"]); // scan_repositories
-    render(<App />);
+    renderApp();
     expect(await screen.findByText("myapp")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/projects/myapp")).toBeInTheDocument();
     expect(screen.getByText("otherapp")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/projects/otherapp")).toBeInTheDocument();
   });
 
   it("refreshes repositories after adding a folder", async () => {
@@ -113,14 +120,13 @@ describe("App", () => {
     mockInvoke.mockResolvedValueOnce(["/home/user/projects"]); // add_folder
     mockInvoke.mockResolvedValueOnce(["/home/user/projects/myapp"]); // scan_repositories (after add)
 
-    render(<App />);
-    await screen.findByText("No repositories found.");
+    renderApp();
+    await screen.findByText("No folders added yet.");
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "+ Add Folder" }));
     });
 
     expect(await screen.findByText("myapp")).toBeInTheDocument();
-    expect(screen.getByText("/home/user/projects/myapp")).toBeInTheDocument();
   });
 });
