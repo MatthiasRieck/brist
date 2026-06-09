@@ -8,6 +8,27 @@ struct Config {
     folders: Vec<String>,
 }
 
+#[derive(Serialize, Clone)]
+pub struct BranchInfo {
+    pub name: String,
+    pub is_current: bool,
+    pub upstream: Option<String>,
+    pub ahead: Option<i32>,
+    pub behind: Option<i32>,
+    pub is_remote: bool,
+    pub gone: bool,
+}
+
+#[derive(Serialize, Clone)]
+pub struct WorktreeInfo {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head: String,
+    pub is_main: bool,
+    pub is_locked: bool,
+    pub is_bare: bool,
+}
+
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let home = app.path().home_dir().map_err(|e| e.to_string())?;
     Ok(home.join(".brist").join("config.json"))
@@ -102,6 +123,121 @@ fn scan_repositories(app: tauri::AppHandle) -> Vec<String> {
     repos
 }
 
+fn parse_track(track: &str) -> (Option<i32>, Option<i32>, bool) {
+    let trimmed = track.trim();
+    if trimmed == "[gone]" {
+        return (None, None, true);
+    }
+    let mut ahead: Option<i32> = None;
+    let mut behind: Option<i32> = None;
+    if let Some(pos) = trimmed.find("ahead ") {
+        let rest = &trimmed[pos + 6..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        ahead = num.parse().ok();
+    }
+    if let Some(pos) = trimmed.find("behind ") {
+        let rest = &trimmed[pos + 7..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        behind = num.parse().ok();
+    }
+    (ahead, behind, false)
+}
+
+#[tauri::command]
+fn get_branches(path: String) -> Result<Vec<BranchInfo>, String> {
+    const FORMAT: &str = "%(refname)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(HEAD)\t%(symref)";
+    let output = std::process::Command::new("git")
+        .args(["for-each-ref", &format!("--format={FORMAT}"), "refs/heads", "refs/remotes"])
+        .current_dir(&path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut branches = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(6, '\t').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let refname = parts[0];
+        let short_name = parts[1];
+        let upstream = parts[2];
+        let track = parts[3];
+        let head_marker = parts[4];
+        let symref = parts.get(5).copied().unwrap_or("");
+        if !symref.is_empty() {
+            continue;
+        }
+        let is_remote = refname.starts_with("refs/remotes/");
+        let is_current = head_marker == "*";
+        let (ahead, behind, gone) = parse_track(track);
+        branches.push(BranchInfo {
+            name: short_name.to_string(),
+            is_current,
+            upstream: if upstream.is_empty() { None } else { Some(upstream.to_string()) },
+            ahead,
+            behind,
+            is_remote,
+            gone,
+        });
+    }
+    Ok(branches)
+}
+
+#[tauri::command]
+fn get_worktrees(path: String) -> Result<Vec<WorktreeInfo>, String> {
+    let output = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(&path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut worktrees = Vec::new();
+    let mut is_first = true;
+    for block in stdout.split("\n\n") {
+        let block = block.trim();
+        if block.is_empty() {
+            continue;
+        }
+        let mut wt_path: Option<String> = None;
+        let mut wt_head = String::new();
+        let mut wt_branch: Option<String> = None;
+        let mut wt_locked = false;
+        let mut wt_bare = false;
+        for line in block.lines() {
+            if let Some(val) = line.strip_prefix("worktree ") {
+                wt_path = Some(val.to_string());
+            } else if let Some(val) = line.strip_prefix("HEAD ") {
+                wt_head = val.to_string();
+            } else if let Some(val) = line.strip_prefix("branch ") {
+                let short = val.strip_prefix("refs/heads/").unwrap_or(val);
+                wt_branch = Some(short.to_string());
+            } else if line == "locked" || line.starts_with("locked ") {
+                wt_locked = true;
+            } else if line == "bare" {
+                wt_bare = true;
+            }
+        }
+        if let Some(p) = wt_path {
+            worktrees.push(WorktreeInfo {
+                path: p,
+                branch: wt_branch,
+                head: wt_head,
+                is_main: is_first,
+                is_locked: wt_locked,
+                is_bare: wt_bare,
+            });
+            is_first = false;
+        }
+    }
+    Ok(worktrees)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -111,7 +247,9 @@ pub fn run() {
             get_folders,
             add_folder,
             remove_folder,
-            scan_repositories
+            scan_repositories,
+            get_branches,
+            get_worktrees
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
