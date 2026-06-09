@@ -145,9 +145,15 @@ fn parse_track(track: &str) -> (Option<i32>, Option<i32>, bool) {
 
 #[tauri::command]
 fn get_branches(path: String) -> Result<Vec<BranchInfo>, String> {
-    const FORMAT: &str = "%(refname)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(HEAD)\t%(symref)";
+    const FORMAT: &str =
+        "%(refname)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(HEAD)\t%(symref)";
     let output = std::process::Command::new("git")
-        .args(["for-each-ref", &format!("--format={FORMAT}"), "refs/heads", "refs/remotes"])
+        .args([
+            "for-each-ref",
+            &format!("--format={FORMAT}"),
+            "refs/heads",
+            "refs/remotes",
+        ])
         .current_dir(&path)
         .output()
         .map_err(|e| e.to_string())?;
@@ -176,7 +182,11 @@ fn get_branches(path: String) -> Result<Vec<BranchInfo>, String> {
         branches.push(BranchInfo {
             name: short_name.to_string(),
             is_current,
-            upstream: if upstream.is_empty() { None } else { Some(upstream.to_string()) },
+            upstream: if upstream.is_empty() {
+                None
+            } else {
+                Some(upstream.to_string())
+            },
             ahead,
             behind,
             is_remote,
