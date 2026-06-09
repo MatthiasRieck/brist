@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { ChevronRight, Folder, GitBranch, Plus, X } from "lucide-react";
+import { ChevronRight, Folder, GitBranch, Lock, Plus, X } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -24,6 +24,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { useHeader } from "@/contexts/HeaderContext";
+import type { WorktreeInfo } from "@/lib/git";
 
 interface FileTreeNode {
   name: string;
@@ -71,6 +72,43 @@ function buildFileTree(repos: string[], rootFolder: string): FileTreeNode[] {
   return toNodes(root, rootFolder);
 }
 
+function WorktreeSubItems({
+  worktrees,
+  selectedRepoPath,
+  onSelect,
+}: {
+  worktrees: WorktreeInfo[];
+  selectedRepoPath?: string;
+  onSelect: (path: string) => void;
+}) {
+  if (worktrees.length === 0) {
+    return (
+      <SidebarMenuSubItem>
+        <span className="px-3 py-1.5 text-xs text-muted-foreground">No worktrees found</span>
+      </SidebarMenuSubItem>
+    );
+  }
+  return (
+    <>
+      {worktrees.map((wt) => (
+        <SidebarMenuSubItem key={wt.path}>
+          <SidebarMenuSubButton
+            isActive={wt.path === selectedRepoPath}
+            onClick={() => onSelect(wt.path)}
+          >
+            <GitBranch className="shrink-0" />
+            <span className="truncate">{wt.branch ?? "(detached)"}</span>
+            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+              {wt.is_main && "main"}
+              {wt.is_locked && <Lock className="h-3 w-3" />}
+            </span>
+          </SidebarMenuSubButton>
+        </SidebarMenuSubItem>
+      ))}
+    </>
+  );
+}
+
 function SubTreeItem({
   node,
   selectedRepoPath,
@@ -81,15 +119,38 @@ function SubTreeItem({
   onSelect: (path: string) => void;
 }) {
   const [open, setOpen] = useState(true);
-  const isSelected = node.fullPath === selectedRepoPath;
+  const [wtOpen, setWtOpen] = useState(false);
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
+
+  async function handleRepoClick() {
+    if (worktrees === null) {
+      try {
+        const wts = await invoke<WorktreeInfo[]>("get_worktrees", { path: node.fullPath });
+        setWorktrees(wts);
+      } catch {
+        setWorktrees([]);
+      }
+    }
+    setWtOpen((o) => !o);
+  }
 
   if (node.isRepo || node.children.length === 0) {
     return (
       <SidebarMenuSubItem>
-        <SidebarMenuSubButton onClick={() => onSelect(node.fullPath)}>
+        <SidebarMenuSubButton onClick={handleRepoClick}>
           <GitBranch className="shrink-0" />
-          <span className={cn(isSelected && "font-bold")}>{node.name}</span>
+          <span>{node.name}</span>
+          <ChevronRight className={cn("ml-auto shrink-0 transition-transform", wtOpen && "rotate-90")} />
         </SidebarMenuSubButton>
+        {wtOpen && worktrees !== null && (
+          <SidebarMenuSub>
+            <WorktreeSubItems
+              worktrees={worktrees}
+              selectedRepoPath={selectedRepoPath}
+              onSelect={onSelect}
+            />
+          </SidebarMenuSub>
+        )}
       </SidebarMenuSubItem>
     );
   }
@@ -126,15 +187,38 @@ function TopLevelTreeItem({
   onSelect: (path: string) => void;
 }) {
   const [open, setOpen] = useState(true);
-  const isSelected = node.fullPath === selectedRepoPath;
+  const [wtOpen, setWtOpen] = useState(false);
+  const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
+
+  async function handleRepoClick() {
+    if (worktrees === null) {
+      try {
+        const wts = await invoke<WorktreeInfo[]>("get_worktrees", { path: node.fullPath });
+        setWorktrees(wts);
+      } catch {
+        setWorktrees([]);
+      }
+    }
+    setWtOpen((o) => !o);
+  }
 
   if (node.isRepo || node.children.length === 0) {
     return (
       <SidebarMenuItem>
-        <SidebarMenuButton onClick={() => onSelect(node.fullPath)}>
+        <SidebarMenuButton onClick={handleRepoClick}>
           <GitBranch className="shrink-0" />
-          <span className={cn(isSelected && "font-bold")}>{node.name}</span>
+          <span>{node.name}</span>
+          <ChevronRight className={cn("ml-auto shrink-0 transition-transform", wtOpen && "rotate-90")} />
         </SidebarMenuButton>
+        {wtOpen && worktrees !== null && (
+          <SidebarMenuSub>
+            <WorktreeSubItems
+              worktrees={worktrees}
+              selectedRepoPath={selectedRepoPath}
+              onSelect={onSelect}
+            />
+          </SidebarMenuSub>
+        )}
       </SidebarMenuItem>
     );
   }
