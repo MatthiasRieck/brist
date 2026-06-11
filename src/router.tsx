@@ -2,11 +2,14 @@ import { createRootRoute, createRoute, createRouter } from "@tanstack/react-rout
 import App from "./App";
 import { RepoPage } from "./pages/RepoPage";
 import { HeaderProvider } from "./contexts/HeaderContext";
+import { SyncProvider } from "./contexts/SyncContext";
 
 function RootComponent() {
   return (
       <HeaderProvider>
-        <App />
+        <SyncProvider>
+          <App />
+        </SyncProvider>
       </HeaderProvider>
   );
 }

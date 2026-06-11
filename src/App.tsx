@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { ChevronRight, Folder, GitBranch, Lock, Plus, X } from "lucide-react";
+import { ChevronRight, Folder, GitBranch, Loader2, Plus, RefreshCw, X } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -24,7 +24,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { useHeader } from "@/contexts/HeaderContext";
-import type { WorktreeInfo } from "@/lib/git";
+import { useSync } from "@/contexts/SyncContext";
 
 interface FileTreeNode {
   name: string;
@@ -72,176 +72,81 @@ function buildFileTree(repos: string[], rootFolder: string): FileTreeNode[] {
   return toNodes(root, rootFolder);
 }
 
-function WorktreeSubItems({
-  worktrees,
-  selectedRepoPath,
-  onSelect,
-}: {
-  worktrees: WorktreeInfo[];
-  selectedRepoPath?: string;
-  onSelect: (path: string) => void;
-}) {
-  if (worktrees.length === 0) {
-    return (
-      <SidebarMenuSubItem>
-        <span className="px-3 py-1.5 text-xs text-muted-foreground">No worktrees found</span>
-      </SidebarMenuSubItem>
-    );
-  }
-  return (
-    <>
-      {worktrees.map((wt) => (
-        <SidebarMenuSubItem key={wt.path}>
-          <SidebarMenuSubButton
-            isActive={wt.path === selectedRepoPath}
-            onClick={() => onSelect(wt.path)}
-          >
-            <GitBranch className="shrink-0" />
-            <span className="truncate">{wt.branch ?? "(detached)"}</span>
-            <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-              {wt.is_main && "main"}
-              {wt.is_locked && <Lock className="h-3 w-3" />}
-            </span>
-          </SidebarMenuSubButton>
-        </SidebarMenuSubItem>
-      ))}
-    </>
-  );
-}
-
-function SubTreeItem({
+function RepoButton({
   node,
   selectedRepoPath,
   onSelect,
+  sub,
 }: {
   node: FileTreeNode;
   selectedRepoPath?: string;
   onSelect: (path: string) => void;
+  sub: boolean;
 }) {
-  const [open, setOpen] = useState(true);
-  const [wtOpen, setWtOpen] = useState(false);
-  const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
-
-  async function handleRepoClick() {
-    if (worktrees === null) {
-      try {
-        const wts = await invoke<WorktreeInfo[]>("get_worktrees", { path: node.fullPath });
-        setWorktrees(wts);
-      } catch {
-        setWorktrees([]);
-      }
-    }
-    setWtOpen((o) => !o);
-  }
-
-  if (node.isRepo || node.children.length === 0) {
-    return (
-      <SidebarMenuSubItem>
-        <SidebarMenuSubButton onClick={handleRepoClick}>
-          <GitBranch className="shrink-0" />
-          <span>{node.name}</span>
-          <ChevronRight className={cn("ml-auto shrink-0 transition-transform", wtOpen && "rotate-90")} />
-        </SidebarMenuSubButton>
-        {wtOpen && worktrees !== null && (
-          <SidebarMenuSub>
-            <WorktreeSubItems
-              worktrees={worktrees}
-              selectedRepoPath={selectedRepoPath}
-              onSelect={onSelect}
-            />
-          </SidebarMenuSub>
-        )}
-      </SidebarMenuSubItem>
-    );
-  }
+  const { fetching } = useSync();
+  const isFetching = fetching.has(node.fullPath);
+  const ButtonComp = sub ? SidebarMenuSubButton : SidebarMenuButton;
   return (
-    <SidebarMenuSubItem>
-      <SidebarMenuSubButton onClick={() => setOpen((o) => !o)}>
-        <Folder className="shrink-0" />
-        <span>{node.name}</span>
-        <ChevronRight className={cn("ml-auto transition-transform", open && "rotate-90")} />
-      </SidebarMenuSubButton>
-      {open && (
-        <SidebarMenuSub>
-          {node.children.map((child) => (
-            <SubTreeItem
-              key={child.fullPath}
-              node={child}
-              selectedRepoPath={selectedRepoPath}
-              onSelect={onSelect}
-            />
-          ))}
-        </SidebarMenuSub>
-      )}
-    </SidebarMenuSubItem>
+    <ButtonComp
+      isActive={node.fullPath === selectedRepoPath}
+      onClick={() => onSelect(node.fullPath)}
+    >
+      <GitBranch className="shrink-0" />
+      <span className="truncate">{node.name}</span>
+      {isFetching && <Loader2 className="ml-auto shrink-0 animate-spin text-muted-foreground" />}
+    </ButtonComp>
   );
 }
 
-function TopLevelTreeItem({
+function TreeItem({
   node,
   selectedRepoPath,
   onSelect,
+  depth,
 }: {
   node: FileTreeNode;
   selectedRepoPath?: string;
   onSelect: (path: string) => void;
+  depth: number;
 }) {
   const [open, setOpen] = useState(true);
-  const [wtOpen, setWtOpen] = useState(false);
-  const [worktrees, setWorktrees] = useState<WorktreeInfo[] | null>(null);
+  const isLeaf = node.isRepo || node.children.length === 0;
+  const ItemComp = depth === 0 ? SidebarMenuItem : SidebarMenuSubItem;
+  const ButtonComp = depth === 0 ? SidebarMenuButton : SidebarMenuSubButton;
 
-  async function handleRepoClick() {
-    if (worktrees === null) {
-      try {
-        const wts = await invoke<WorktreeInfo[]>("get_worktrees", { path: node.fullPath });
-        setWorktrees(wts);
-      } catch {
-        setWorktrees([]);
-      }
-    }
-    setWtOpen((o) => !o);
-  }
-
-  if (node.isRepo || node.children.length === 0) {
+  if (isLeaf) {
     return (
-      <SidebarMenuItem>
-        <SidebarMenuButton onClick={handleRepoClick}>
-          <GitBranch className="shrink-0" />
-          <span>{node.name}</span>
-          <ChevronRight className={cn("ml-auto shrink-0 transition-transform", wtOpen && "rotate-90")} />
-        </SidebarMenuButton>
-        {wtOpen && worktrees !== null && (
-          <SidebarMenuSub>
-            <WorktreeSubItems
-              worktrees={worktrees}
-              selectedRepoPath={selectedRepoPath}
-              onSelect={onSelect}
-            />
-          </SidebarMenuSub>
-        )}
-      </SidebarMenuItem>
+      <ItemComp>
+        <RepoButton
+          node={node}
+          selectedRepoPath={selectedRepoPath}
+          onSelect={onSelect}
+          sub={depth > 0}
+        />
+      </ItemComp>
     );
   }
   return (
-    <SidebarMenuItem>
-      <SidebarMenuButton onClick={() => setOpen((o) => !o)}>
+    <ItemComp>
+      <ButtonComp onClick={() => setOpen((o) => !o)}>
         <Folder className="shrink-0" />
         <span>{node.name}</span>
         <ChevronRight className={cn("ml-auto transition-transform", open && "rotate-90")} />
-      </SidebarMenuButton>
+      </ButtonComp>
       {open && (
         <SidebarMenuSub>
           {node.children.map((child) => (
-            <SubTreeItem
+            <TreeItem
               key={child.fullPath}
               node={child}
               selectedRepoPath={selectedRepoPath}
               onSelect={onSelect}
+              depth={depth + 1}
             />
           ))}
         </SidebarMenuSub>
       )}
-    </SidebarMenuItem>
+    </ItemComp>
   );
 }
 
@@ -249,6 +154,7 @@ function App() {
   const [folders, setFolders] = useState<string[]>([]);
   const [repos, setRepos] = useState<string[]>([]);
   const { headerContent } = useHeader();
+  const { fetching, fetchRepos } = useSync();
   const navigate = useNavigate();
   const selectedRepoPath = useRouterState({
     select: (state) => {
@@ -290,15 +196,29 @@ function App() {
     navigate({ to: "/repo", search: { path } });
   }
 
+  const anyFetching = fetching.size > 0;
+
   return (
     <SidebarProvider>
       <Sidebar className="border-t">
         <SidebarHeader className="flex flex-row items-center justify-between px-4 py-3">
           <span className="text-lg font-bold">brist</span>
-          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={addFolder}>
-            <Plus />
-            <span className="sr-only">+ Add Folder</span>
-          </Button>
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => fetchRepos(repos)}
+              disabled={anyFetching || repos.length === 0}
+            >
+              <RefreshCw className={cn(anyFetching && "animate-spin")} />
+              <span className="sr-only">Fetch all repositories</span>
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={addFolder}>
+              <Plus />
+              <span className="sr-only">+ Add Folder</span>
+            </Button>
+          </div>
         </SidebarHeader>
         <SidebarContent>
           {folders.length === 0 ? (
@@ -323,11 +243,12 @@ function App() {
                     ) : (
                       <SidebarMenu>
                         {tree.map((node) => (
-                          <TopLevelTreeItem
+                          <TreeItem
                             key={node.fullPath}
                             node={node}
                             selectedRepoPath={selectedRepoPath}
                             onSelect={handleSelectRepo}
+                            depth={0}
                           />
                         ))}
                       </SidebarMenu>

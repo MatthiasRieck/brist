@@ -1,32 +1,21 @@
+mod git;
+
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+use git::{
+    BranchInfo, ConflictFile, GraphCommit, OpOutcome, RebaseSession, RebaseState, RepoAnalysis,
+    SquashPreview, WorktreeInfo,
+};
+
 #[derive(Serialize, Deserialize, Default)]
 struct Config {
     folders: Vec<String>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct BranchInfo {
-    pub name: String,
-    pub is_current: bool,
-    pub upstream: Option<String>,
-    pub ahead: Option<i32>,
-    pub behind: Option<i32>,
-    pub is_remote: bool,
-    pub gone: bool,
-}
-
-#[derive(Serialize, Clone)]
-pub struct WorktreeInfo {
-    pub path: String,
-    pub branch: Option<String>,
-    pub head: String,
-    pub is_main: bool,
-    pub is_locked: bool,
-    pub is_bare: bool,
+    #[serde(default)]
+    branch_owners: HashMap<String, HashMap<String, bool>>,
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -123,129 +112,144 @@ fn scan_repositories(app: tauri::AppHandle) -> Vec<String> {
     repos
 }
 
-fn parse_track(track: &str) -> (Option<i32>, Option<i32>, bool) {
-    let trimmed = track.trim();
-    if trimmed == "[gone]" {
-        return (None, None, true);
-    }
-    let mut ahead: Option<i32> = None;
-    let mut behind: Option<i32> = None;
-    if let Some(pos) = trimmed.find("ahead ") {
-        let rest = &trimmed[pos + 6..];
-        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        ahead = num.parse().ok();
-    }
-    if let Some(pos) = trimmed.find("behind ") {
-        let rest = &trimmed[pos + 7..];
-        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        behind = num.parse().ok();
-    }
-    (ahead, behind, false)
-}
-
 #[tauri::command]
 fn get_branches(path: String) -> Result<Vec<BranchInfo>, String> {
-    const FORMAT: &str =
-        "%(refname)\t%(refname:short)\t%(upstream:short)\t%(upstream:track)\t%(HEAD)\t%(symref)";
-    let output = std::process::Command::new("git")
-        .args([
-            "for-each-ref",
-            &format!("--format={FORMAT}"),
-            "refs/heads",
-            "refs/remotes",
-        ])
-        .current_dir(&path)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut branches = Vec::new();
-    for line in stdout.lines() {
-        let parts: Vec<&str> = line.splitn(6, '\t').collect();
-        if parts.len() < 5 {
-            continue;
-        }
-        let refname = parts[0];
-        let short_name = parts[1];
-        let upstream = parts[2];
-        let track = parts[3];
-        let head_marker = parts[4];
-        let symref = parts.get(5).copied().unwrap_or("");
-        if !symref.is_empty() {
-            continue;
-        }
-        let is_remote = refname.starts_with("refs/remotes/");
-        let is_current = head_marker == "*";
-        let (ahead, behind, gone) = parse_track(track);
-        branches.push(BranchInfo {
-            name: short_name.to_string(),
-            is_current,
-            upstream: if upstream.is_empty() {
-                None
-            } else {
-                Some(upstream.to_string())
-            },
-            ahead,
-            behind,
-            is_remote,
-            gone,
-        });
-    }
-    Ok(branches)
+    git::list_branches(&path)
 }
 
 #[tauri::command]
 fn get_worktrees(path: String) -> Result<Vec<WorktreeInfo>, String> {
-    let output = std::process::Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(&path)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut worktrees = Vec::new();
-    let mut is_first = true;
-    for block in stdout.split("\n\n") {
-        let block = block.trim();
-        if block.is_empty() {
-            continue;
+    git::list_worktrees(&path)
+}
+
+#[tauri::command]
+fn fetch_repo(path: String) -> Result<(), String> {
+    git::fetch(&path)
+}
+
+#[tauri::command]
+fn get_repo_analysis(app: tauri::AppHandle, path: String) -> Result<RepoAnalysis, String> {
+    let config = read_config(&app);
+    let overrides = config.branch_owners.get(&path).cloned().unwrap_or_default();
+    git::repo_analysis(&path, &overrides)
+}
+
+#[tauri::command]
+fn set_branch_owner(
+    app: tauri::AppHandle,
+    repo: String,
+    branch: String,
+    mine: Option<bool>,
+) -> Result<(), String> {
+    let mut config = read_config(&app);
+    let repo_overrides = config.branch_owners.entry(repo).or_default();
+    match mine {
+        Some(value) => {
+            repo_overrides.insert(branch, value);
         }
-        let mut wt_path: Option<String> = None;
-        let mut wt_head = String::new();
-        let mut wt_branch: Option<String> = None;
-        let mut wt_locked = false;
-        let mut wt_bare = false;
-        for line in block.lines() {
-            if let Some(val) = line.strip_prefix("worktree ") {
-                wt_path = Some(val.to_string());
-            } else if let Some(val) = line.strip_prefix("HEAD ") {
-                wt_head = val.to_string();
-            } else if let Some(val) = line.strip_prefix("branch ") {
-                let short = val.strip_prefix("refs/heads/").unwrap_or(val);
-                wt_branch = Some(short.to_string());
-            } else if line == "locked" || line.starts_with("locked ") {
-                wt_locked = true;
-            } else if line == "bare" {
-                wt_bare = true;
-            }
-        }
-        if let Some(p) = wt_path {
-            worktrees.push(WorktreeInfo {
-                path: p,
-                branch: wt_branch,
-                head: wt_head,
-                is_main: is_first,
-                is_locked: wt_locked,
-                is_bare: wt_bare,
-            });
-            is_first = false;
+        None => {
+            repo_overrides.remove(&branch);
         }
     }
-    Ok(worktrees)
+    write_config(&app, &config)
+}
+
+#[tauri::command]
+fn add_worktree(
+    repo: String,
+    worktree_path: String,
+    branch: String,
+    create_branch: bool,
+    base: Option<String>,
+) -> Result<(), String> {
+    git::add_worktree(
+        &repo,
+        &worktree_path,
+        &branch,
+        create_branch,
+        base.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn remove_worktree(repo: String, worktree_path: String, force: bool) -> Result<(), String> {
+    git::remove_worktree(&repo, &worktree_path, force)
+}
+
+#[tauri::command]
+fn rebase_branch(
+    state: tauri::State<RebaseState>,
+    repo: String,
+    branch: String,
+    onto: String,
+) -> Result<OpOutcome, String> {
+    git::start_rebase(&state, &repo, &branch, &onto)
+}
+
+#[tauri::command]
+fn rebase_continue(state: tauri::State<RebaseState>, repo: String) -> Result<OpOutcome, String> {
+    git::continue_rebase(&state, &repo)
+}
+
+#[tauri::command]
+fn rebase_abort(state: tauri::State<RebaseState>, repo: String) -> Result<(), String> {
+    git::abort_rebase(&state, &repo)
+}
+
+#[tauri::command]
+fn get_rebase_session(state: tauri::State<RebaseState>, repo: String) -> Option<RebaseSession> {
+    git::current_session(&state, &repo)
+}
+
+#[tauri::command]
+fn get_conflict_files(
+    state: tauri::State<RebaseState>,
+    repo: String,
+) -> Result<Vec<ConflictFile>, String> {
+    git::session_conflicts(&state, &repo)
+}
+
+#[tauri::command]
+fn read_conflict_file(
+    state: tauri::State<RebaseState>,
+    repo: String,
+    file: String,
+) -> Result<String, String> {
+    git::read_conflict(&state, &repo, &file)
+}
+
+#[tauri::command]
+fn save_conflict_file(
+    state: tauri::State<RebaseState>,
+    repo: String,
+    file: String,
+    content: String,
+) -> Result<(), String> {
+    git::save_conflict(&state, &repo, &file, &content)
+}
+
+#[tauri::command]
+fn get_squash_preview(repo: String, branch: String, base: String) -> Result<SquashPreview, String> {
+    git::squash_preview(&repo, &branch, &base)
+}
+
+#[tauri::command]
+fn squash_branch(
+    repo: String,
+    branch: String,
+    base: String,
+    message: String,
+) -> Result<(), String> {
+    git::squash_branch(&repo, &branch, &base, &message)
+}
+
+#[tauri::command]
+fn get_graph(
+    repo: String,
+    refs: Option<Vec<String>>,
+    limit: Option<u32>,
+) -> Result<Vec<GraphCommit>, String> {
+    git::graph(&repo, refs, limit)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -253,13 +257,29 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(RebaseState::default())
         .invoke_handler(tauri::generate_handler![
             get_folders,
             add_folder,
             remove_folder,
             scan_repositories,
             get_branches,
-            get_worktrees
+            get_worktrees,
+            fetch_repo,
+            get_repo_analysis,
+            set_branch_owner,
+            add_worktree,
+            remove_worktree,
+            rebase_branch,
+            rebase_continue,
+            rebase_abort,
+            get_rebase_session,
+            get_conflict_files,
+            read_conflict_file,
+            save_conflict_file,
+            get_squash_preview,
+            squash_branch,
+            get_graph
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -289,22 +309,39 @@ mod tests {
     }
 
     #[test]
+    fn read_config_accepts_legacy_format_without_branch_owners() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, br#"{"folders": ["/home/user/docs"]}"#).unwrap();
+        let config = read_config_from_path(&path);
+        assert_eq!(config.folders, vec!["/home/user/docs"]);
+        assert!(config.branch_owners.is_empty());
+    }
+
+    #[test]
     fn write_and_read_config_round_trips() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("config.json");
+        let mut branch_owners = HashMap::new();
+        branch_owners.insert(
+            "/repo".to_string(),
+            HashMap::from([("feature/x".to_string(), true)]),
+        );
         let original = Config {
             folders: vec!["/home/user/docs".to_string(), "/home/user/pics".to_string()],
+            branch_owners,
         };
         write_config_to_path(&path, &original).unwrap();
         let loaded = read_config_from_path(&path);
         assert_eq!(loaded.folders, original.folders);
+        assert_eq!(loaded.branch_owners, original.branch_owners);
     }
 
     #[test]
     fn write_config_creates_parent_directories() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("nested").join("dirs").join("config.json");
-        let config = Config { folders: vec![] };
+        let config = Config::default();
         write_config_to_path(&path, &config).unwrap();
         assert!(path.exists());
     }
@@ -338,6 +375,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let mut config = Config {
             folders: vec!["/home/user/docs".to_string(), "/home/user/pics".to_string()],
+            ..Config::default()
         };
         config.folders.retain(|f| f != "/home/user/docs");
         write_config_to_path(&path, &config).unwrap();
@@ -351,6 +389,7 @@ mod tests {
         let path = dir.path().join("config.json");
         let original = Config {
             folders: vec!["/home/user/docs".to_string()],
+            ..Config::default()
         };
         write_config_to_path(&path, &original).unwrap();
 

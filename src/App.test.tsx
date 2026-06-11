@@ -113,6 +113,124 @@ describe("App", () => {
     expect(screen.getByText("otherapp")).toBeInTheDocument();
   });
 
+  it("navigates to the repo page with categorized branches when a repo is clicked", async () => {
+    const repo = "/home/user/projects/myapp";
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "get_folders":
+          return Promise.resolve(["/home/user/projects"]);
+        case "scan_repositories":
+          return Promise.resolve([repo]);
+        case "get_branches":
+          return Promise.resolve([
+            {
+              name: "main",
+              is_current: true,
+              upstream: "origin/main",
+              ahead: 0,
+              behind: 0,
+              is_remote: false,
+              gone: false,
+              author_email: "me@example.com",
+              committer_date: 1700000000,
+            },
+            {
+              name: "feature/x",
+              is_current: false,
+              upstream: null,
+              ahead: null,
+              behind: null,
+              is_remote: false,
+              gone: false,
+              author_email: "me@example.com",
+              committer_date: 1700000000,
+            },
+          ]);
+        case "get_worktrees":
+          return Promise.resolve([
+            {
+              path: repo,
+              branch: "main",
+              head: "abc123",
+              is_main: true,
+              is_locked: false,
+              is_bare: false,
+              has_changes: false,
+            },
+          ]);
+        case "get_repo_analysis":
+          return Promise.resolve({
+            default_branch: "main",
+            main_branches: ["main"],
+            user_email: "me@example.com",
+            branches: [
+              {
+                name: "main",
+                is_main: true,
+                target: null,
+                ahead_of_target: null,
+                behind_target: null,
+                is_mine: true,
+                mine_override: null,
+              },
+              {
+                name: "feature/x",
+                is_main: false,
+                target: "main",
+                ahead_of_target: 2,
+                behind_target: 1,
+                is_mine: true,
+                mine_override: null,
+              },
+            ],
+          });
+        case "get_rebase_session":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve([]);
+      }
+    });
+
+    renderApp();
+    const repoButton = await screen.findByText("myapp");
+    await act(async () => {
+      fireEvent.click(repoButton);
+    });
+
+    expect(await screen.findByText("feature/x")).toBeInTheDocument();
+    expect(screen.getByText("default")).toBeInTheDocument();
+    expect(screen.getByText("Worktrees")).toBeInTheDocument();
+    expect(screen.getByText(/Rebase all \(1\)/)).toBeInTheDocument();
+  });
+
+  it("fetches every repository when the fetch-all button is clicked", async () => {
+    const repos = ["/home/user/projects/a", "/home/user/projects/b"];
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "get_folders":
+          return Promise.resolve(["/home/user/projects"]);
+        case "scan_repositories":
+          return Promise.resolve(repos);
+        case "fetch_repo":
+          return Promise.resolve();
+        default:
+          return Promise.resolve([]);
+      }
+    });
+
+    renderApp();
+    await screen.findByText("a");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Fetch all repositories" }));
+    });
+
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("fetch_repo", { path: repos[0] });
+      expect(mockInvoke).toHaveBeenCalledWith("fetch_repo", { path: repos[1] });
+    });
+  });
+
   it("refreshes repositories after adding a folder", async () => {
     mockInvoke.mockResolvedValueOnce([]); // get_folders
     mockInvoke.mockResolvedValueOnce([]); // scan_repositories (initial)
