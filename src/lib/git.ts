@@ -93,6 +93,12 @@ export const gitApi = {
   ) => invoke<void>("add_worktree", { repo, worktreePath, branch, createBranch, base }),
   removeWorktree: (repo: string, worktreePath: string, force: boolean) =>
     invoke<void>("remove_worktree", { repo, worktreePath, force }),
+  switchBranch: (worktree: string, branch: string) =>
+    invoke<void>("switch_branch", { worktree, branch }),
+  pushBranch: (repo: string, branch: string, force: boolean) =>
+    invoke<void>("push_branch", { repo, branch, force }),
+  pullBranch: (repo: string, branch: string) =>
+    invoke<void>("pull_branch", { repo, branch }),
   rebaseBranch: (repo: string, branch: string, onto: string) =>
     invoke<OpOutcome>("rebase_branch", { repo, branch, onto }),
   rebaseContinue: (repo: string) => invoke<OpOutcome>("rebase_continue", { repo }),

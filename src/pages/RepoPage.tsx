@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearch } from "@tanstack/react-router";
 import {
   Check,
+  Download,
   FolderGit2,
   GitBranch,
   GitGraph as GitGraphIcon,
@@ -12,6 +13,7 @@ import {
   Plus,
   RefreshCw,
   Trash2,
+  Upload,
   User,
 } from "lucide-react";
 import { useHeader } from "@/contexts/HeaderContext";
@@ -27,6 +29,14 @@ import {
   type WorktreeInfo,
 } from "@/lib/git";
 import { Button } from "@/components/ui/button";
+import { NativeSelect } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { AddWorktreeDialog } from "@/components/AddWorktreeDialog";
 import { SquashDialog } from "@/components/SquashDialog";
 import { ConflictDialog } from "@/components/ConflictDialog";
@@ -68,11 +78,13 @@ function BranchStatusBadge({ branch }: { branch: BranchInfo | undefined }) {
 function WorktreeRow({
   repo,
   worktree,
-  onRemoved,
+  branchOptions,
+  onChanged,
 }: {
   repo: string;
   worktree: WorktreeInfo;
-  onRemoved: () => void;
+  branchOptions: string[];
+  onChanged: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -83,7 +95,7 @@ function WorktreeRow({
     setError(null);
     try {
       await gitApi.removeWorktree(repo, worktree.path, force);
-      onRemoved();
+      onChanged();
     } catch (e: unknown) {
       setError(String(e));
       setBusy(false);
@@ -91,10 +103,41 @@ function WorktreeRow({
     }
   }
 
+  async function switchTo(branch: string) {
+    if (!branch || branch === worktree.branch) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await gitApi.switchBranch(worktree.path, branch);
+      onChanged();
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <li className="flex items-center gap-2 rounded-md px-3 py-1.5 hover:bg-accent/50">
       <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-      <span className="font-mono text-sm">{worktree.branch ?? "(detached)"}</span>
+      {worktree.is_bare ? (
+        <span className="font-mono text-sm">(bare)</span>
+      ) : (
+        <NativeSelect
+          aria-label={`Branch checked out at ${worktree.path}`}
+          className="h-6 w-auto min-w-36 font-mono text-xs"
+          value={worktree.branch ?? ""}
+          disabled={busy}
+          onChange={(e) => switchTo(e.target.value)}
+        >
+          {worktree.branch === null && <option value="">(detached)</option>}
+          {branchOptions.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </NativeSelect>
+      )}
       <span className="truncate text-xs text-muted-foreground">{worktree.path}</span>
       {worktree.is_locked && <Lock className="h-3 w-3 shrink-0 text-muted-foreground" />}
       {worktree.has_changes && (
@@ -127,6 +170,68 @@ function WorktreeRow({
   );
 }
 
+function CheckoutDialog({
+  branch,
+  worktrees,
+  onOpenChange,
+  onCheckout,
+}: {
+  branch: string;
+  worktrees: WorktreeInfo[];
+  onOpenChange: (open: boolean) => void;
+  onCheckout: (worktreePath: string) => Promise<void>;
+}) {
+  const [target, setTarget] = useState(worktrees[0]?.path ?? "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function checkout() {
+    setBusy(true);
+    setError(null);
+    try {
+      await onCheckout(target);
+      onOpenChange(false);
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Check out <span className="font-mono">{branch}</span>
+          </DialogTitle>
+        </DialogHeader>
+        <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+          In worktree
+          <NativeSelect value={target} onChange={(e) => setTarget(e.target.value)}>
+            {worktrees.map((w) => (
+              <option key={w.path} value={w.path}>
+                {w.path}
+                {w.branch ? ` (${w.branch})` : ""}
+              </option>
+            ))}
+          </NativeSelect>
+        </label>
+        {error && <p className="text-xs text-destructive">{error}</p>}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button onClick={checkout} disabled={busy || !target}>
+            {busy && <Loader2 className="animate-spin" />}
+            Checkout
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 interface RebaseRun {
   base: string;
   queue: string[];
@@ -150,6 +255,9 @@ export function RepoPage() {
   const [graphCommits, setGraphCommits] = useState<GraphCommit[] | null>(null);
 
   const [addWorktreeOpen, setAddWorktreeOpen] = useState(false);
+  const [checkoutBranch, setCheckoutBranch] = useState<string | null>(null);
+  const [pushing, setPushing] = useState<string | null>(null);
+  const [forceConfirm, setForceConfirm] = useState<string | null>(null);
   const [squash, setSquash] = useState<{ branch: string; base: string } | null>(null);
   const [conflict, setConflict] = useState<{
     branch: string;
@@ -209,12 +317,16 @@ export function RepoPage() {
       setGraphCommits(null);
       let refs: string[] | null = null;
       if (scope !== "all" && analysis) {
-        const localNames = new Set(branches.filter((b) => !b.is_remote).map((b) => b.name));
-        const baseRef = localNames.has(scope) ? scope : `origin/${scope}`;
+        const baseRefs: string[] = [];
+        if (branches.some((b) => !b.is_remote && b.name === scope)) baseRefs.push(scope);
+        if (branches.some((b) => b.is_remote && b.name === `origin/${scope}`)) {
+          baseRefs.push(`origin/${scope}`);
+        }
+        if (baseRefs.length === 0) baseRefs.push(scope);
         const attached = analysis.branches
           .filter((b) => b.target === scope)
           .map((b) => b.name);
-        refs = [baseRef, ...attached];
+        refs = [...baseRefs, ...attached];
       }
       try {
         setGraphCommits(await gitApi.getGraph(path, refs));
@@ -295,6 +407,118 @@ export function RepoPage() {
     worktrees.filter((w) => w.branch).map((w) => [w.branch as string, w]),
   );
 
+  const localNames = branches.filter((b) => !b.is_remote).map((b) => b.name);
+  const remoteShortNames = [
+    ...new Set(
+      branches
+        .filter((b) => b.is_remote && !b.name.endsWith("/HEAD"))
+        .map((b) => b.name.replace(/^[^/]+\//, "")),
+    ),
+  ].filter((n) => !localNames.includes(n));
+
+  function branchOptionsFor(wt: WorktreeInfo): string[] {
+    const takenElsewhere = new Set(
+      worktrees.filter((w) => w.path !== wt.path && w.branch).map((w) => w.branch as string),
+    );
+    return [...localNames, ...remoteShortNames].filter((n) => !takenElsewhere.has(n));
+  }
+
+  async function doCheckout(branch: string, worktreePath: string) {
+    await gitApi.switchBranch(worktreePath, branch);
+    await reload();
+  }
+
+  async function push(branch: string, force: boolean) {
+    setPushing(branch);
+    setError(null);
+    try {
+      await gitApi.pushBranch(path, branch, force);
+      await reload();
+    } catch (e: unknown) {
+      setError(`Push of ${branch} failed: ${String(e)}`);
+    } finally {
+      setPushing(null);
+      setForceConfirm(null);
+    }
+  }
+
+  async function pull(branch: string) {
+    setPushing(branch);
+    setError(null);
+    try {
+      await gitApi.pullBranch(path, branch);
+      await reload();
+    } catch (e: unknown) {
+      setError(`Pull of ${branch} failed: ${String(e)}`);
+    } finally {
+      setPushing(null);
+    }
+  }
+
+  function PushButton({ branch }: { branch: string }) {
+    const info = localByName.get(branch);
+    if (!info) return null;
+    const ahead = info.ahead ?? 0;
+    const behind = info.behind ?? 0;
+    const needsPublish = !info.upstream || info.gone;
+    // behind only -> just fast-forward; force push is for diverged (rebased) branches
+    const needsPull = !needsPublish && behind > 0 && ahead === 0;
+    const needsForce = !needsPublish && behind > 0 && ahead > 0;
+    const hasWork = needsPublish || needsPull || needsForce || ahead > 0;
+    if (!hasWork) return null;
+    const busy = pushing === branch;
+    if (needsPull) {
+      return (
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={pushing !== null}
+          onClick={() => pull(branch)}
+          title="Fast-forward to the latest upstream changes"
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <Download />}
+          Pull
+        </Button>
+      );
+    }
+    if (needsForce) {
+      const confirming = forceConfirm === branch;
+      return (
+        <Button
+          size="xs"
+          variant={confirming ? "destructive" : "ghost"}
+          disabled={pushing !== null}
+          onClick={() => (confirming ? push(branch, true) : setForceConfirm(branch))}
+          title="Upstream has diverged (e.g. after a rebase) — pushes with --force-with-lease"
+        >
+          {busy ? <Loader2 className="animate-spin" /> : <Upload />}
+          {confirming ? "Confirm force push?" : "Force push"}
+        </Button>
+      );
+    }
+    return (
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={pushing !== null}
+        onClick={() => push(branch, false)}
+        title={needsPublish ? "Publish branch to origin" : "Push to upstream"}
+      >
+        {busy ? <Loader2 className="animate-spin" /> : <Upload />}
+        {needsPublish ? "Publish" : "Push"}
+      </Button>
+    );
+  }
+
+  function requestCheckout(branch: string) {
+    const candidates = worktrees.filter((w) => !w.is_bare);
+    if (candidates.length === 1) {
+      doCheckout(branch, candidates[0].path).catch((e: unknown) => setError(String(e)));
+    } else if (candidates.length > 1) {
+      setCheckoutBranch(branch);
+    }
+  }
+
   const groups = (analysis?.main_branches ?? []).map((main) => ({
     main,
     children: (analysis?.branches ?? []).filter((b) => b.target === main),
@@ -348,6 +572,18 @@ export function RepoPage() {
           </span>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {!wt && (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={rebasing !== null}
+              onClick={() => requestCheckout(branch.name)}
+              title="Check out this branch in a worktree"
+            >
+              <GitBranch />
+              Checkout
+            </Button>
+          )}
           {target && (branch.ahead_of_target ?? 0) + (branch.behind_target ?? 0) > 0 && (
             <span className="text-xs text-muted-foreground">
               {branch.ahead_of_target ? `↑${branch.ahead_of_target}` : ""}
@@ -355,6 +591,7 @@ export function RepoPage() {
             </span>
           )}
           <BranchStatusBadge branch={info} />
+          <PushButton branch={branch.name} />
           {target && (
             <>
               <Button
@@ -478,7 +715,13 @@ export function RepoPage() {
             ) : (
               <ul className="space-y-0.5">
                 {worktrees.map((wt) => (
-                  <WorktreeRow key={wt.path} repo={path} worktree={wt} onRemoved={reload} />
+                  <WorktreeRow
+                    key={wt.path}
+                    repo={path}
+                    worktree={wt}
+                    branchOptions={branchOptionsFor(wt)}
+                    onChanged={reload}
+                  />
                 ))}
               </ul>
             )}
@@ -503,6 +746,7 @@ export function RepoPage() {
                 )}
                 <BranchStatusBadge branch={localByName.get(main)} />
                 <div className="ml-auto flex items-center gap-1.5">
+                  <PushButton branch={main} />
                   <Button size="xs" variant="ghost" onClick={() => showGraph(main)}>
                     <GitGraphIcon /> Graph
                   </Button>
@@ -561,6 +805,18 @@ export function RepoPage() {
                   >
                     <span className="h-3.5 w-3.5 shrink-0" />
                     <span className="font-mono text-sm text-muted-foreground">{b.name}</span>
+                    <div className="ml-auto">
+                      <Button
+                        size="xs"
+                        variant="ghost"
+                        disabled={rebasing !== null}
+                        onClick={() => requestCheckout(b.name.replace(/^[^/]+\//, ""))}
+                        title="Create a local branch and check it out"
+                      >
+                        <GitBranch />
+                        Checkout
+                      </Button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -587,6 +843,16 @@ export function RepoPage() {
             if (!open) setSquash(null);
           }}
           onSquashed={reload}
+        />
+      )}
+      {checkoutBranch && (
+        <CheckoutDialog
+          branch={checkoutBranch}
+          worktrees={worktrees.filter((w) => !w.is_bare)}
+          onOpenChange={(open) => {
+            if (!open) setCheckoutBranch(null);
+          }}
+          onCheckout={(worktreePath) => doCheckout(checkoutBranch, worktreePath)}
         />
       )}
       {conflict && (

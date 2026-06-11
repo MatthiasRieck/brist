@@ -128,7 +128,7 @@ describe("App", () => {
               is_current: true,
               upstream: "origin/main",
               ahead: 0,
-              behind: 0,
+              behind: 2,
               is_remote: false,
               gone: false,
               author_email: "me@example.com",
@@ -197,10 +197,45 @@ describe("App", () => {
       fireEvent.click(repoButton);
     });
 
-    expect(await screen.findByText("feature/x")).toBeInTheDocument();
+    expect((await screen.findAllByText("feature/x")).length).toBeGreaterThan(0);
     expect(screen.getByText("default")).toBeInTheDocument();
     expect(screen.getByText("Worktrees")).toBeInTheDocument();
     expect(screen.getByText(/Rebase all \(1\)/)).toBeInTheDocument();
+
+    // switching the branch of a worktree invokes switch_branch
+    const select = screen.getByLabelText(`Branch checked out at ${repo}`);
+    await act(async () => {
+      fireEvent.change(select, { target: { value: "feature/x" } });
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("switch_branch", {
+        worktree: repo,
+        branch: "feature/x",
+      });
+    });
+
+    // feature/x has no upstream -> a Publish button pushes it with -u
+    const publishButton = await screen.findByRole("button", { name: "Publish" });
+    await act(async () => {
+      fireEvent.click(publishButton);
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("push_branch", {
+        repo,
+        branch: "feature/x",
+        force: false,
+      });
+    });
+
+    // main is behind only -> offers Pull (fast-forward), never force push
+    const pullButton = await screen.findByRole("button", { name: "Pull" });
+    await act(async () => {
+      fireEvent.click(pullButton);
+    });
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("pull_branch", { repo, branch: "main" });
+    });
+    expect(screen.queryByRole("button", { name: /Force push/ })).not.toBeInTheDocument();
   });
 
   it("fetches every repository when the fetch-all button is clicked", async () => {

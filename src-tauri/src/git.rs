@@ -137,6 +137,33 @@ fn resolve_ref(dir: &str, name: &str) -> Option<String> {
     None
 }
 
+fn is_ancestor(dir: &str, ancestor: &str, descendant: &str) -> bool {
+    run_git(dir, &["merge-base", "--is-ancestor", ancestor, descendant]).is_ok()
+}
+
+/// Resolve the ref to use as a BASE branch (rebase target, merge target,
+/// squash base). Unlike `resolve_ref` this considers origin/<name> as well and
+/// picks whichever is further ahead, so a stale local base branch doesn't
+/// matter after a fetch. On divergence origin wins.
+fn resolve_base_ref(dir: &str, name: &str) -> Option<String> {
+    let local = ref_exists(dir, &format!("refs/heads/{name}")).then(|| name.to_string());
+    let remote =
+        ref_exists(dir, &format!("refs/remotes/origin/{name}")).then(|| format!("origin/{name}"));
+    match (local, remote) {
+        (Some(local), Some(remote)) => {
+            if is_ancestor(dir, &remote, &local) {
+                // local contains origin's head (or equal) -> local is current
+                Some(local)
+            } else {
+                Some(remote)
+            }
+        }
+        (Some(local), None) => Some(local),
+        (None, Some(remote)) => Some(remote),
+        (None, None) => ref_exists(dir, name).then(|| name.to_string()),
+    }
+}
+
 fn rev_list_count(dir: &str, args: &[&str]) -> Option<i32> {
     let mut full = vec!["rev-list", "--count"];
     full.extend_from_slice(args);
@@ -423,7 +450,7 @@ fn detect_main_branches(
         }
         candidates.push(short);
     }
-    let default_ref = default_branch.and_then(|d| resolve_ref(path, d));
+    let default_ref = default_branch.and_then(|d| resolve_base_ref(path, d));
     let mut mains: Vec<String> = Vec::new();
     if let Some(d) = default_branch {
         mains.push(d.to_string());
@@ -437,7 +464,8 @@ fn detect_main_branches(
             continue;
         }
         // Merge-heavy heuristic: at least 3 merge commits unique to this branch.
-        if let (Some(default_ref), Some(branch_ref)) = (&default_ref, resolve_ref(path, name)) {
+        if let (Some(default_ref), Some(branch_ref)) = (&default_ref, resolve_base_ref(path, name))
+        {
             let merges = rev_list_count(
                 path,
                 &["--min-parents=2", &branch_ref, &format!("^{default_ref}")],
@@ -464,7 +492,7 @@ pub fn analyze_branches(
 ) -> Vec<AnalyzedBranch> {
     let main_refs: Vec<(String, String)> = mains
         .iter()
-        .filter_map(|m| resolve_ref(path, m).map(|r| (m.clone(), r)))
+        .filter_map(|m| resolve_base_ref(path, m).map(|r| (m.clone(), r)))
         .collect();
     let mut result = Vec::new();
     for b in branches.iter().filter(|b| !b.is_remote) {
@@ -534,6 +562,78 @@ pub fn repo_analysis(
 
 pub fn fetch(path: &str) -> Result<(), String> {
     run_git(path, &["fetch", "--all", "--prune"]).map(|_| ())
+}
+
+/// Switch `worktree` to `branch`. Uses `git switch`, so a remote-only branch
+/// name automatically gets a local tracking branch, and git itself refuses
+/// when the branch is checked out in another worktree or changes would be
+/// overwritten.
+pub fn switch_branch(worktree: &str, branch: &str) -> Result<(), String> {
+    run_git(worktree, &["switch", branch]).map(|_| ())
+}
+
+fn branch_upstream(repo: &str, branch: &str) -> Option<String> {
+    run_git(
+        repo,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    )
+    .ok()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+}
+
+/// Update `branch` to the latest state of its upstream, fast-forward only.
+/// If the branch is checked out somewhere, a `git pull --ff-only` runs in
+/// that worktree; otherwise the local ref is fast-forwarded via a fetch
+/// refspec (which git refuses for non-fast-forward updates).
+pub fn pull_branch(repo: &str, branch: &str) -> Result<(), String> {
+    let upstream = branch_upstream(repo, branch)
+        .ok_or_else(|| format!("Branch '{branch}' has no upstream to pull from."))?;
+    for wt in list_worktrees(repo)? {
+        if wt.branch.as_deref() == Some(branch) {
+            return run_git(&wt.path, &["pull", "--ff-only"]).map(|_| ());
+        }
+    }
+    let (remote, remote_branch) = upstream
+        .split_once('/')
+        .ok_or_else(|| format!("Unexpected upstream '{upstream}'"))?;
+    run_git(
+        repo,
+        &["fetch", remote, &format!("{remote_branch}:{branch}")],
+    )
+    .map(|_| ())
+}
+
+/// Push `branch` to its upstream (publishing with `-u origin` when it has
+/// none). `force` uses --force-with-lease so a rebased branch can be pushed
+/// without clobbering commits someone else pushed in the meantime.
+pub fn push_branch(repo: &str, branch: &str, force: bool) -> Result<(), String> {
+    let upstream = branch_upstream(repo, branch);
+    let mut args: Vec<String> = vec!["push".to_string()];
+    if force {
+        args.push("--force-with-lease".to_string());
+    }
+    match upstream {
+        Some(upstream) => {
+            let (remote, remote_branch) = upstream
+                .split_once('/')
+                .ok_or_else(|| format!("Unexpected upstream '{upstream}'"))?;
+            args.push(remote.to_string());
+            args.push(format!("{branch}:{remote_branch}"));
+        }
+        None => {
+            args.push("-u".to_string());
+            args.push("origin".to_string());
+            args.push(branch.to_string());
+        }
+    }
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git(repo, &arg_refs).map(|_| ())
 }
 
 pub fn add_worktree(
@@ -644,7 +744,8 @@ pub fn start_rebase(
             return Err("A rebase is already in progress for this repository.".to_string());
         }
     }
-    let onto_ref = resolve_ref(repo, onto).ok_or_else(|| format!("Cannot resolve ref '{onto}'"))?;
+    let onto_ref =
+        resolve_base_ref(repo, onto).ok_or_else(|| format!("Cannot resolve ref '{onto}'"))?;
     let (wt, is_temp) = acquire_worktree(repo, branch)?;
     // core.editor/sequence.editor are passed per-invocation so the user's git
     // config is never touched; commit messages are edited in the app instead.
@@ -771,7 +872,8 @@ pub fn save_conflict(
 }
 
 pub fn squash_preview(repo: &str, branch: &str, base: &str) -> Result<SquashPreview, String> {
-    let base_ref = resolve_ref(repo, base).ok_or_else(|| format!("Cannot resolve ref '{base}'"))?;
+    let base_ref =
+        resolve_base_ref(repo, base).ok_or_else(|| format!("Cannot resolve ref '{base}'"))?;
     let merge_base = run_git(repo, &["merge-base", &base_ref, branch])?
         .trim()
         .to_string();
@@ -822,7 +924,8 @@ pub fn squash_preview(repo: &str, branch: &str, base: &str) -> Result<SquashPrev
 }
 
 pub fn squash_branch(repo: &str, branch: &str, base: &str, message: &str) -> Result<(), String> {
-    let base_ref = resolve_ref(repo, base).ok_or_else(|| format!("Cannot resolve ref '{base}'"))?;
+    let base_ref =
+        resolve_base_ref(repo, base).ok_or_else(|| format!("Cannot resolve ref '{base}'"))?;
     let (wt, is_temp) = acquire_worktree(repo, branch)?;
     let original_tip = run_git(&wt, &["rev-parse", "HEAD"])
         .map(|s| s.trim().to_string())
@@ -1140,6 +1243,211 @@ mod tests {
         let tip_after = run_git(&repo, &["rev-parse", "feature"]).unwrap();
         assert_eq!(tip_before, tip_after);
         assert_eq!(list_worktrees(&repo).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn switch_branch_changes_worktree_head() {
+        let (_tmp, repo) = init_repo();
+        commit_file(&repo, "a.txt", "1", "init");
+        git(&repo, &["branch", "feature"]);
+
+        switch_branch(&repo, "feature").unwrap();
+        let head = run_git(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), "feature");
+
+        // switching to a branch checked out in another worktree must fail
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("wt").to_str().unwrap().to_string();
+        add_worktree(&repo, &wt_path, "main", false, None).unwrap();
+        assert!(switch_branch(&repo, "main").is_err());
+        // ...but the worktree itself can switch back and forth
+        switch_branch(&repo, "feature").unwrap();
+    }
+
+    #[test]
+    fn switch_branch_creates_tracking_branch_for_remote_only_branch() {
+        let (_tmp, origin) = init_repo();
+        commit_file(&origin, "a.txt", "1", "init");
+        git(&origin, &["branch", "feature"]);
+
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = clone_dir.path().join("clone").to_str().unwrap().to_string();
+        git(&origin, &["clone", &origin, &clone]);
+        git(&clone, &["config", "user.email", "me@example.com"]);
+        git(&clone, &["config", "user.name", "Me"]);
+
+        // only origin/feature exists locally
+        assert!(!ref_exists(&clone, "refs/heads/feature"));
+        switch_branch(&clone, "feature").unwrap();
+        assert!(ref_exists(&clone, "refs/heads/feature"));
+        let head = run_git(&clone, &["symbolic-ref", "--short", "HEAD"]).unwrap();
+        assert_eq!(head.trim(), "feature");
+    }
+
+    #[test]
+    fn rebase_and_analysis_use_origin_base_when_local_base_is_stale() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path().to_str().unwrap().to_string();
+        git(&bare, &["init", "--bare", "-b", "main"]);
+
+        let work_parent = tempfile::tempdir().unwrap();
+        let work = work_parent
+            .path()
+            .join("work")
+            .to_str()
+            .unwrap()
+            .to_string();
+        git(
+            work_parent.path().to_str().unwrap(),
+            &["clone", &bare, &work],
+        );
+        git(&work, &["config", "user.email", "me@example.com"]);
+        git(&work, &["config", "user.name", "Me"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["switch", "-C", "main"]);
+
+        commit_file(&work, "base.txt", "base", "init");
+        git(&work, &["push", "-u", "origin", "main"]);
+        git(&work, &["switch", "-c", "feature"]);
+        commit_file(&work, "feat.txt", "feat", "feature work");
+        git(&work, &["switch", "main"]);
+        commit_file(&work, "advance.txt", "new", "main advance");
+        git(&work, &["push"]);
+        // local main becomes stale: origin/main is one commit ahead of it
+        git(&work, &["reset", "--hard", "HEAD~1"]);
+
+        // behind_target is measured against origin/main, not the stale local main
+        let analysis = repo_analysis(&work, &HashMap::new()).unwrap();
+        let feature = analysis
+            .branches
+            .iter()
+            .find(|b| b.name == "feature")
+            .unwrap();
+        assert_eq!(feature.target.as_deref(), Some("main"));
+        assert_eq!(feature.behind_target, Some(1));
+
+        // rebasing onto "main" rebases onto origin/main's head
+        let state = RebaseState::default();
+        let outcome = start_rebase(&state, &work, "feature", "main").unwrap();
+        assert!(matches!(outcome, OpOutcome::Completed));
+        let origin_tip = run_git(&work, &["rev-parse", "origin/main"]).unwrap();
+        let merge_base = run_git(&work, &["merge-base", "origin/main", "feature"]).unwrap();
+        assert_eq!(origin_tip.trim(), merge_base.trim());
+    }
+
+    #[test]
+    fn local_base_wins_when_it_is_ahead_of_origin() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path().to_str().unwrap().to_string();
+        git(&bare, &["init", "--bare", "-b", "main"]);
+
+        let work_parent = tempfile::tempdir().unwrap();
+        let work = work_parent
+            .path()
+            .join("work")
+            .to_str()
+            .unwrap()
+            .to_string();
+        git(
+            work_parent.path().to_str().unwrap(),
+            &["clone", &bare, &work],
+        );
+        git(&work, &["config", "user.email", "me@example.com"]);
+        git(&work, &["config", "user.name", "Me"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["switch", "-C", "main"]);
+
+        commit_file(&work, "base.txt", "base", "init");
+        git(&work, &["push", "-u", "origin", "main"]);
+        // local main moves ahead of origin/main
+        commit_file(&work, "local.txt", "l", "local only");
+
+        assert_eq!(resolve_base_ref(&work, "main").as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn pull_branch_fast_forwards_checked_out_and_other_branches() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path().to_str().unwrap().to_string();
+        git(&bare, &["init", "--bare", "-b", "main"]);
+
+        let parent = tempfile::tempdir().unwrap();
+        let parent_path = parent.path().to_str().unwrap();
+        let work1 = parent.path().join("work1").to_str().unwrap().to_string();
+        let work2 = parent.path().join("work2").to_str().unwrap().to_string();
+        git(parent_path, &["clone", &bare, &work1]);
+        for repo in [&work1] {
+            git(repo, &["config", "user.email", "me@example.com"]);
+            git(repo, &["config", "user.name", "Me"]);
+            git(repo, &["config", "commit.gpgsign", "false"]);
+        }
+        git(&work1, &["switch", "-C", "main"]);
+        commit_file(&work1, "a.txt", "1", "init");
+        git(&work1, &["push", "-u", "origin", "main"]);
+
+        git(parent_path, &["clone", &bare, &work2]);
+        // a second local branch tracking origin/main, not checked out
+        git(&work2, &["branch", "--track", "mirror", "origin/main"]);
+
+        // remote moves ahead
+        commit_file(&work1, "b.txt", "2", "second");
+        git(&work1, &["push"]);
+
+        // checked-out branch: pull --ff-only in its worktree
+        pull_branch(&work2, "main").unwrap();
+        let main_tip = run_git(&work2, &["rev-parse", "main"]).unwrap();
+        let origin_tip = run_git(&work2, &["rev-parse", "origin/main"]).unwrap();
+        assert_eq!(main_tip, origin_tip);
+
+        // not checked out: fast-forwarded via fetch refspec
+        pull_branch(&work2, "mirror").unwrap();
+        let mirror_tip = run_git(&work2, &["rev-parse", "mirror"]).unwrap();
+        assert_eq!(mirror_tip, origin_tip);
+
+        // a branch without upstream is rejected
+        git(&work2, &["branch", "standalone"]);
+        assert!(pull_branch(&work2, "standalone").is_err());
+    }
+
+    #[test]
+    fn push_branch_publishes_and_force_pushes_after_rewrite() {
+        let bare_dir = tempfile::tempdir().unwrap();
+        let bare = bare_dir.path().to_str().unwrap().to_string();
+        git(&bare, &["init", "--bare", "-b", "main"]);
+
+        let work_parent = tempfile::tempdir().unwrap();
+        let work = work_parent
+            .path()
+            .join("work")
+            .to_str()
+            .unwrap()
+            .to_string();
+        git(
+            work_parent.path().to_str().unwrap(),
+            &["clone", &bare, &work],
+        );
+        git(&work, &["config", "user.email", "me@example.com"]);
+        git(&work, &["config", "user.name", "Me"]);
+        git(&work, &["config", "commit.gpgsign", "false"]);
+        git(&work, &["switch", "-C", "main"]);
+        commit_file(&work, "a.txt", "1", "init");
+
+        // no upstream yet -> publishes with -u origin
+        push_branch(&work, "main", false).unwrap();
+        assert!(ref_exists(&bare, "refs/heads/main"));
+        let upstream = run_git(&work, &["rev-parse", "--abbrev-ref", "main@{upstream}"]).unwrap();
+        assert_eq!(upstream.trim(), "origin/main");
+
+        // fast-forward push works without force
+        commit_file(&work, "b.txt", "2", "second");
+        push_branch(&work, "main", false).unwrap();
+
+        // history rewrite (as after a rebase): plain push refused, force succeeds
+        git(&work, &["commit", "--amend", "-m", "rewritten"]);
+        assert!(push_branch(&work, "main", false).is_err());
+        push_branch(&work, "main", true).unwrap();
+        let subject = run_git(&bare, &["log", "-1", "--format=%s", "main"]).unwrap();
+        assert_eq!(subject.trim(), "rewritten");
     }
 
     #[test]

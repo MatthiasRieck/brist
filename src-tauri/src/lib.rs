@@ -89,8 +89,13 @@ fn find_git_repos(root: &Path) -> Vec<PathBuf> {
         if name_str.starts_with('.') || name_str == "node_modules" || name_str == "target" {
             continue;
         }
-        if path.join(".git").exists() {
-            repos.push(path);
+        let git_path = path.join(".git");
+        if git_path.exists() {
+            // A real repository has a .git directory; linked worktrees (and
+            // submodules) have a .git file instead and must not be listed.
+            if git_path.is_dir() {
+                repos.push(path);
+            }
         } else {
             repos.extend(find_git_repos(&path));
         }
@@ -174,6 +179,21 @@ fn add_worktree(
 #[tauri::command]
 fn remove_worktree(repo: String, worktree_path: String, force: bool) -> Result<(), String> {
     git::remove_worktree(&repo, &worktree_path, force)
+}
+
+#[tauri::command]
+fn switch_branch(worktree: String, branch: String) -> Result<(), String> {
+    git::switch_branch(&worktree, &branch)
+}
+
+#[tauri::command]
+fn push_branch(repo: String, branch: String, force: bool) -> Result<(), String> {
+    git::push_branch(&repo, &branch, force)
+}
+
+#[tauri::command]
+fn pull_branch(repo: String, branch: String) -> Result<(), String> {
+    git::pull_branch(&repo, &branch)
 }
 
 #[tauri::command]
@@ -270,6 +290,9 @@ pub fn run() {
             set_branch_owner,
             add_worktree,
             remove_worktree,
+            switch_branch,
+            push_branch,
+            pull_branch,
             rebase_branch,
             rebase_continue,
             rebase_abort,
@@ -434,6 +457,22 @@ mod tests {
         let repos = find_git_repos(dir.path());
         assert_eq!(repos.len(), 1);
         assert!(repos[0].ends_with("visible"));
+    }
+
+    #[test]
+    fn find_git_repos_skips_linked_worktrees_with_git_file() {
+        let dir = tempdir().unwrap();
+        // real repository: .git directory
+        let repo = dir.path().join("org").join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        // linked worktree next to it: .git is a file
+        let worktree = dir.path().join("org").join("repo-feature-x");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: /somewhere/.git/worktrees/x").unwrap();
+
+        let repos = find_git_repos(dir.path());
+        assert_eq!(repos.len(), 1);
+        assert!(repos[0].ends_with("org/repo"));
     }
 
     #[test]
